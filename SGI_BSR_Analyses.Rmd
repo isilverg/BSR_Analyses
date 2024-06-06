@@ -1,0 +1,538 @@
+---
+title: "SGI_BSR_Analyses"
+output: html_document
+date: "2024-06-06"
+---
+
+```{r setup & packages, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#Load Packages
+library(here) #set wd here
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(grid)
+library(forcats)
+library(stringr)
+library(sf)
+library(ggspatial)
+library(plotly)
+library(patchwork)
+library(USA.state.boundaries)
+library(giscoR)
+```
+
+## Map
+First, we will make a map of our sampling site (St. George Island), sampled loggerhead sea turtle nests, and the regional context.
+This requires US Maritime Boundaries downlaoded from:
+https://nauticalcharts.noaa.gov/data/us-maritime-limits-and-boundaries.html 
+We also load in a CSV file with the GPS locations of every sampled nest: "Nest_Locs.csv"
+
+```{r map, echo=FALSE, include=FALSE}
+#Set up basemap layers
+NorthAm <- gisco_get_countries( #Use giscoR to get MX and US polygons
+  epsg = "4326",
+  resolution = "03",
+  spatialtype = "RG",
+  country = c("US", "MX")
+)
+
+data("state_boundaries_wgs84") #Load data for US states
+
+Florida <- state_boundaries_wgs84 %>% # Subset the data just for florida
+  filter(NAME %in% "Florida")
+
+# Make a label for the USA
+US_label <- t(as.data.frame(c("United States", -83.0, 36.0)))
+rownames(US_label)<-c()
+colnames(US_label)<-c("label", "lon", "lat")
+US_label<-as.data.frame(US_label)
+US_label$lon<-as.numeric(US_label$lon)
+US_label$lat<-as.numeric(US_label$lat)
+US_label <- st_as_sf(US_label, coords = c("lon", "lat"), 
+                     crs = 4326)
+
+# Make a label for Mexico
+MX_label <- t(as.data.frame(c("Mexico", -101.7, 27.0)))
+rownames(MX_label)<-c()
+colnames(MX_label)<-c("label", "lon", "lat")
+MX_label<-as.data.frame(MX_label)
+MX_label$lon<-as.numeric(MX_label$lon)
+MX_label$lat<-as.numeric(MX_label$lat)
+MX_label <- st_as_sf(MX_label, coords = c("lon", "lat"), 
+                     crs = 4326)
+
+#Load in points for sampled nests
+Excel <- read.csv("Nest_Locs.csv") #CSV containing nest GPS points
+Excel$Nest <- as.factor(Excel$Nest) #Make "Nest" a factor
+
+#Make and format dataframes for information for St. George Island, FL (this study), 
+#Sanibel Island, FL (Lasala et al. 2018), and Wassaw Island, GA (Lasala et al. 2013)
+SGI <- t(as.data.frame(c("St. George Island, Florida", -84.99, 29.68, "BSR: 1.3:1 M:F", "MP: 17%"))) #St. George Info
+rownames(SGI) <- c()
+colnames(SGI) <- c("label", "lon", "lat", "BSR", "MP")
+SGI <- as.data.frame(SGI)
+SGI$lon <- as.numeric(SGI$lon)
+SGI$lat <- as.numeric(SGI$lat)
+
+Sanibel <- t(as.data.frame(c("Sanibel Island, Florida", -82.12, 26.44, "BSR: 2.5:1 M:F","MP: 70%"))) #Sanibel Info
+rownames(Sanibel) <- c()
+colnames(Sanibel) <- c("label", "lon", "lat", "BSR", "MP")
+Sanibel <- as.data.frame(Sanibel)
+Sanibel$lon <- as.numeric(Sanibel$lon)
+Sanibel$lat <- as.numeric(Sanibel$lat)
+
+Wassaw <- t(as.data.frame(c("Wassaw Island, Georgia", -80.96, 31.88, "BSR: 2.65:1 M:F", "MP: 75%"))) #Wassaw Info
+rownames(Wassaw) <- c()
+colnames(Wassaw) <- c("label", "lon", "lat", "BSR", "MP")
+Wassaw <- as.data.frame(Wassaw)
+Wassaw$lon <- as.numeric(Wassaw$lon)
+Wassaw$lat <- as.numeric(Wassaw$lat)
+
+#Make a polygon around St. George Island to identify the map inset
+SGI_coords <- matrix(c(
+  -85.5, 30.0,  # NW
+  -84.3, 30.0,   # NE
+  -84.3, 29.3,  # SE
+  -85.5, 29.3,  # SW
+  -85.5, 30.0   # Back to NW
+), ncol = 2, byrow = TRUE)
+
+SGI_polygon <- st_polygon(list(SGI_coords)) %>% # Create an sf polygon object
+  st_sfc() %>%
+  st_set_crs(4326)
+
+#Create Recovery Unit (RU) polylines
+#To do this, we will import shapefiles of offshore US maritime boundaries, cut out the Florida Big Bend, 
+#and then subset into different RUs
+
+#Read in and filter US Maritime Boundaries:
+MB <- st_read("./Map/USMaritimeLimitsNBoundaries.shp")
+MB <- MB %>%
+  filter(REGION == "Atlantic Coast and Gulf of Mexico") %>%
+  filter(FEAT_TYPE == "Maritime Limit") %>%
+  filter(TS=="1")
+
+#Create Big Bend polygon
+big_bend_coords <- matrix(c(
+  -84.45, 29.70,  # Dog Island
+  -82.0, 31.90,   # Approximate inland point
+  -82.5, 28.25,  # Anclotte Key
+  -82.84, 28.15,  # Point off Anclotte Key coast
+  -84.45, 29.70   # Back to Dog Island to close the polygon
+), ncol = 2, byrow = TRUE)
+
+# Create an sf polygon object
+big_bend_polygon <- st_polygon(list(big_bend_coords)) %>%
+  st_sfc() %>%
+  st_set_crs(4326)
+
+#Crop Big Bend out of all polygons in Maritime Boundaries
+MB <- MB %>%
+  st_difference(., big_bend_polygon)
+
+#Make Northern GUlf of Mexico (NGM) RU
+NGMRU <- st_crop(MB, xmin = -98, xmax = -84.4, ymin = 26.0, ymax = 31.0)
+
+#Make Peninsular Florida (PF) RU
+#Need two polygons because cropping is tricky given the position of the Keys and Dry Tortugas
+PFRU1 <- st_crop(MB, xmin = -83.1, xmax = -78.0, ymin = 24.9, ymax = 30.5)
+PFRU2 <- st_crop(MB, xmin = -81.9, xmax = -78.0, ymin = 22.0, ymax = 30.5)
+PFRU <- rbind(PFRU1, PFRU2) #combine shapes
+
+#Make Dry Tortugas (DT) RU
+DTRU <- st_crop(MB, xmin = -85.0, xmax = -81.9, ymin = 24.2, ymax = 24.9)
+
+#Make Northern (N) RU
+NRU <- st_crop(MB, xmin = -81.5, xmax = -75.0, ymin = 30.5, ymax = 36.9)
+
+# Make legend points for RUs
+RU_legend <- as.data.frame(list(
+  label = c("Northern RU", "Peninsular Florida RU", "Dry Tortugas RU", "Northern Gulf of Mexico RU"),
+  lon = c(-79, -79, -79, -79),
+  lat = c(25.5, 25, 24.5, 24)
+  ))
+
+#Store a plot of the basemaps, St. George inset, other sites, and RUs as "p.main"
+#This is Figure 1
+p.main <- ggplot() +
+  geom_sf(data = NorthAm) +
+  geom_sf(data = NGMRU, color = "blue", linewidth=1.5) +
+  geom_sf(data = PFRU, color = "green", linewidth=1.5) +
+  geom_sf(data = DTRU, color = "orange", linewidth=1.5) +
+  geom_sf(data = NRU, color = "purple", linewidth=1.5) +
+  geom_point(data=RU_legend, aes(x=lon, y=lat, fill=label), size=3, shape=22)+
+  scale_fill_manual(values = c( 'orange', "blue", "purple", "green"))+
+  geom_text(data=RU_legend, aes(x=lon, y=lat, label = label), size=3, hjust=0, nudge_x = 0.3)+
+  geom_point(data=Sanibel, aes(x=lon, y=lat), size=3, shape=24, fill="greenyellow")+
+  geom_text(data=Sanibel, aes(x=lon, y=lat, label=label), size=3.5, fontface="bold", nudge_x = -7.7, hjust = 0)+
+  geom_text(data=Sanibel, aes(x=lon, y=lat, label=BSR), size=3.5, nudge_x = -7.7, nudge_y = -0.5,  hjust = 0)+
+  geom_text(data=Sanibel, aes(x=lon, y=lat, label=MP), size=3.5, nudge_x = -7.7, nudge_y = -1,  hjust = 0)+
+  geom_point(data=Wassaw, aes(x=lon, y=lat), size=3, shape=24, fill="magenta")+
+  geom_text(data=Wassaw, aes(x=lon, y=lat, label=label), size=3.5, fontface="bold", nudge_x = 0.83, hjust = 0)+
+  geom_text(data=Wassaw, aes(x=lon, y=lat, label=BSR), size=3.5, nudge_x = 0.83, nudge_y = -0.5,  hjust = 0)+
+  geom_text(data=Wassaw, aes(x=lon, y=lat, label=MP), size=3.5, nudge_x = 0.83, nudge_y = -1,  hjust = 0)+
+  geom_sf_text(data = US_label, aes(label = label), fontface = "bold", size = 4)+
+  geom_sf_text(data = MX_label, aes(label = label), fontface = "bold", size = 4)+
+  geom_sf(data=SGI_polygon, color = "red", fill="transparent", linewidth=0.7)+
+  annotate("text", x=-73, y=38.5, label="A", size=6)+
+  lims(x=c(-104.0, -73.0), y=c(24.0, 38.5))+
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_text(size=12),
+        legend.position = 'none',
+        plot.background = element_rect(colour = "black", fill="white", linewidth = 1))+
+  annotation_scale(location="bl", width_hint=0.6)+
+  #^scale bar
+  annotation_north_arrow(location="bl", which_north="true",
+                         pad_x = unit(0.0, "in"), pad_y = unit(0.25, "in"),
+                         style=north_arrow_fancy_orienteering)
+
+#Visualize p.main, but not worth changing anything until you have seen the final jpeg export
+p.main
+
+#Create the inset map of St. George Island and the sampled nests
+p.inset <- ggplot()+
+  geom_sf(data=Florida) +
+  geom_text(data=SGI, aes(x=lon, y=lat, label=label), size=3.5, fontface="bold", nudge_x = 0.07, nudge_y = -0.075, hjust = 0) +
+  geom_text(data=SGI, aes(x=lon, y=lat, label=BSR), size=3.5, nudge_x = 0.07, nudge_y = -0.097,  hjust = 0)+
+  geom_text(data=SGI, aes(x=lon, y=lat, label=MP), size=3.5, nudge_x = 0.07, nudge_y = -0.119,  hjust = 0)+
+  geom_point(data=Excel, aes(Lon, Lat), size=0.8, alpha=1)+
+  annotate("text", x=-85.2, y=29.779, label="B", size=6)+
+  lims(x=c(-85.2, -84.60), y=c(29.55, 29.80))+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(), 
+        axis.text = element_text(size=8),
+        legend.position = 'none',
+        panel.border = element_rect(colour = "red", fill=NA, linewidth = 2),
+        plot.background = element_rect(colour = "black", fill="white", linewidth=1)) +
+  annotation_scale(location="bl", width_hint=0.2)
+
+#Visualize p.inset, but not worth changing anything until you have seen the final jpeg export
+p.inset
+
+#Export the final map as a jpeg
+#Only change the code above based on the jpeg!
+jpeg("Figure1_Map.jpeg", width=8, height =5, units="in", res=400)
+p.main + inset_element(p.inset, left=0.01, top=1.01, right=0.55, bottom=0.47) 
+dev.off()
+```
+
+## Analyze COLONY 2.0 Output
+Now we import the "Best ML Cluster" output from COLONY into R.
+First, that output needs to be saved as a CSV file in your working directory.
+Here, it is "Colony_Output.csv".
+
+```{r read data, echo=FALSE}
+#Read and format data
+results<-read.csv("Colony_Output.csv")
+results$nest<-str_extract(results$Offspring, "[^_]+")
+results$ClusterIndex<-as.factor(results$ClusterIndex)
+results$Offspring<-as.factor(results$Offspring)
+results$Father<-gsub("^\\*", "",results$Father)
+results$Father<-as.factor(results$Father)
+results$Mother<-as.factor(results$Mother)
+results$nest<-as.factor(results$nest)
+
+summary(results) #just to check
+
+#Now, make a dataframe of which inferred sires fathered hatchlings in nests
+dads<-results %>%
+  count(nest, Father)
+counts<-count(results, nest)
+dads$count<-0
+dads$count<-counts[match(dads$nest, counts$nest),2]
+dads$prop<-round(dads$n/dads$count, 2)
+dads$female<-results[match(dads$nest, results$nest),5] #Add a column for the female that laid each nest
+```
+
+## BSR Calculations and visualizations
+These next chunks examine BSR and paternity for all nests, nests with >10 hatchlings sampled, and nests with >15 hatchlings sampled 
+
+First, calculate BSR for all nests.
+```{r BSR All, echo=FALSE}
+#All Nests
+n<-length(unique(dads$nest))
+f<-length(unique(dads$Father))
+m<-length(unique(dads$female))
+bsr<-round(f/m, 3)
+
+print(paste0("Nests sampled: ", n))
+print(paste0("Males inferred: ", f))
+print(paste0("Females sampled/inferred: ", m))
+print(paste0("BSR: ", bsr, " M:F"))
+```
+Enumerate and plot paternity for all nests
+
+```{r MP All, echo=FALSE}
+MP <- dads %>% 
+  group_by(nest) %>%
+  summarise(num_dads = length(nest)) %>% #how many fathers per nest
+  group_by(num_dads) %>%
+  summarize(nests = length(num_dads)) #how many nests with different levels of MP
+
+MP #view the dataframe
+
+#Before plotting anything, need to order the females for labeling the x axis
+female_list<-unique(dads$female)
+
+custom_sort <- function(x) {
+  #Check if the string starts with "#"
+  if (substr(x, 1, 1) == "#") {
+    #Extract numeric part and convert to numeric
+    as.numeric(gsub("#", "", x))
+  } else {
+    #Treat non-numeric strings as character vectors
+    x
+  }
+}
+
+sorted_females <- female_list[order(sapply(female_list, custom_sort))] #Sort the list using the custom sorting function
+dads$female <- factor(dads$female, levels = sorted_females) #Now sort the "female" factor in the data
+dads$nest <- factor(dads$nest, levels = unique(dads$nest[order(dads$female)])) #Now sort the "nest" factor by the "female" factor
+dads$count <- factor(dads$count, levels = unique(dads$count[order(dads$female)])) #Now sort the "count" factor by the "female" factor
+labels <- dads$female[order(dads$female)] #Extract labels for plot
+
+#Plot the number of fathers in each nest
+dads %>%
+  ggplot(aes(x=nest), group=Father)+
+  geom_bar()+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle=45, hjust=1))+
+  ylab("# Fathers")+
+  xlab("Nests")+
+  scale_x_discrete(breaks = dads$nest, labels = dads$female)+
+  geom_text(aes(label = count), stat = "count", vjust = -0.5, colour = "black") #Adds a label of hatchlings sampled per nest
+
+#Look for polygyny
+#First identify any fathers that are present in multiple nests
+dups<-dads %>%
+  filter(duplicated(Father))
+dups<-as.data.frame(dups)
+dups$Father<-as.factor(dups$Father)
+
+#Add binary factor for whether or not a father was present in multiple nests
+dads$dup_dads<-as.factor(ifelse(dads$Father %in% dups$Father, "Yes", "No"))
+
+#Plot hatchlings by nest with breaks for different fathers
+#This is Figure 2
+dads.plot<-dads %>%
+  ggplot(aes(x=nest, y=n, fill=dup_dads))+  #fill=Father, 
+  geom_col(position="stack", color="black")+
+  scale_fill_manual(values=c("Yes"="white", "No"="grey"))+
+  theme_classic()+
+  scale_x_discrete(breaks = dads$nest, labels = dads$female)+
+  ylab("Hatchlings")+
+  xlab("Females")+
+  geom_text(data=subset(dads, dup_dads=="Yes"), aes(label = Father), size=3.5, stat = "identity", vjust = 1.5, colour = "black")+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle=90, hjust=1, vjust=0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_text(size=13),
+        axis.title.y = element_text(size=13),
+        plot.background = element_rect(colour = "black", fill="white", size=1))
+
+#View dads.plot
+dads.plot
+
+#Export plot
+jpeg("Figure2_Fathers.jpeg", width=10, height =5, units="in", res=400)
+dads.plot
+dev.off()
+```
+
+Now do the same for nests with >=10 hatchlings sampled
+```{r BSR 10, echo=FALSE}
+#Remake "dads" data just to be safe after manipulations above
+dads<-results %>%
+  count(nest, Father)
+counts<-count(results, nest)
+dads$count<-0
+dads$count<-counts[match(dads$nest, counts$nest),2]
+dads$prop<-round(dads$n/dads$count, 2)
+dads$female<-results[match(dads$nest, results$nest),5]
+
+#Nests with >10 hatchlings
+dads_10<-dads %>% filter(count>=10)
+n<-length(unique(dads_10$nest))
+f<-length(unique(dads_10$Father))
+m<-length(unique(dads_10$female))
+bsr<-round(f/m, 3)
+
+print(paste0("Nests sampled: ", n))
+print(paste0("Males inferred: ", f))
+print(paste0("Females sampled/inferred: ", m))
+print(paste0("BSR: ", bsr, " M:F"))
+```
+
+Enumerate and plot paternity for nests with >= 10 hatchlings sampled
+```{r MP 10, echo=FALSE}
+MP <- dads_10 %>% 
+  group_by(nest) %>%
+  summarise(num_dads_10 = length(nest)) %>% #how many fathers per nest
+  group_by(num_dads_10) %>%
+  summarize(nests = length(num_dads_10)) #how many nests with different levels of MP
+
+MP #view the dataframe
+
+#Before plotting anything, need to order the females for labeling the x axis
+female_list<-unique(dads_10$female)
+
+custom_sort <- function(x) {
+  #Check if the string starts with "#"
+  if (substr(x, 1, 1) == "#") {
+    #Extract numeric part and convert to numeric
+    as.numeric(gsub("#", "", x))
+  } else {
+    #Treat non-numeric strings as character vectors
+    x
+  }
+}
+
+sorted_females <- female_list[order(sapply(female_list, custom_sort))] #Sort the list using the custom sorting function
+dads_10$female <- factor(dads_10$female, levels = sorted_females) #Now sort the "female" factor in the data
+dads_10$nest <- factor(dads_10$nest, levels = unique(dads_10$nest[order(dads_10$female)])) #Now sort the "nest" factor by the "female" factor
+dads_10$count <- factor(dads_10$count, levels = unique(dads_10$count[order(dads_10$female)])) #Now sort the "count" factor by the "female" factor
+labels <- dads_10$female[order(dads_10$female)] #Extract labels for plot
+
+#Plot the number of fathers in each nest
+dads_10 %>%
+  ggplot(aes(x=nest), group=Father)+
+  geom_bar()+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle=45, hjust=1))+
+  ylab("# Fathers")+
+  xlab("Nests")+
+  scale_x_discrete(breaks = dads_10$nest, labels = dads_10$female)+
+  geom_text(aes(label = count), stat = "count", vjust = -0.5, colour = "black") #Adds a label of hatchlings sampled per nest
+
+#Look for polygyny
+#First identify any fathers that are present in multiple nests
+dups<-dads_10 %>%
+  filter(duplicated(Father))
+dups<-as.data.frame(dups)
+dups$Father<-as.factor(dups$Father)
+
+#Add binary factor for whether or not a father was present in multiple nests
+dads_10$dup_dads_10<-as.factor(ifelse(dads_10$Father %in% dups$Father, "Yes", "No"))
+
+#Plot hatchlings by nest with breaks for different fathers
+#This is Figure 2
+dads_10.plot<-dads_10 %>%
+  ggplot(aes(x=nest, y=n, fill=dup_dads_10))+  #fill=Father, 
+  geom_col(position="stack", color="black")+
+  scale_fill_manual(values=c("Yes"="white", "No"="grey"))+
+  theme_classic()+
+  scale_x_discrete(breaks = dads_10$nest, labels = dads_10$female)+
+  ylab("Hatchlings")+
+  xlab("Females")+
+  geom_text(data=subset(dads_10, dup_dads_10=="Yes"), aes(label = Father), size=3.5, stat = "identity", vjust = 1.5, colour = "black")+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle=90, hjust=1, vjust=0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_text(size=13),
+        axis.title.y = element_text(size=13),
+        plot.background = element_rect(colour = "black", fill="white", size=1))
+
+#View dads_10.plot
+dads_10.plot
+```
+Now do the same for nests with >= 15 hatchlings sampled
+```{r BSR 15, echo=FALSE}
+#Remake "dads" data just to be safe after manipulations above
+dads<-results %>%
+  count(nest, Father)
+counts<-count(results, nest)
+dads$count<-0
+dads$count<-counts[match(dads$nest, counts$nest),2]
+dads$prop<-round(dads$n/dads$count, 2)
+dads$female<-results[match(dads$nest, results$nest),5]
+
+#Nests with >10 hatchlings
+dads_15<-dads %>% filter(count>=15)
+n<-length(unique(dads_15$nest))
+f<-length(unique(dads_15$Father))
+m<-length(unique(dads_15$female))
+bsr<-round(f/m, 3)
+
+print(paste0("Nests sampled: ", n))
+print(paste0("Males inferred: ", f))
+print(paste0("Females sampled/inferred: ", m))
+print(paste0("BSR: ", bsr, " M:F"))
+```
+
+Enumerate and plot paternity for nests with >= 10 hatchlings sampled
+```{r MP 15, echo=FALSE}
+MP <- dads_15 %>% 
+  group_by(nest) %>%
+  summarise(num_dads_15 = length(nest)) %>% #how many fathers per nest
+  group_by(num_dads_15) %>%
+  summarize(nests = length(num_dads_15)) #how many nests with different levels of MP
+
+MP #view the dataframe
+
+#Before plotting anything, need to order the females for labeling the x axis
+female_list<-unique(dads_15$female)
+
+custom_sort <- function(x) {
+  #Check if the string starts with "#"
+  if (substr(x, 1, 1) == "#") {
+    #Extract numeric part and convert to numeric
+    as.numeric(gsub("#", "", x))
+  } else {
+    #Treat non-numeric strings as character vectors
+    x
+  }
+}
+
+sorted_females <- female_list[order(sapply(female_list, custom_sort))] #Sort the list using the custom sorting function
+dads_15$female <- factor(dads_15$female, levels = sorted_females) #Now sort the "female" factor in the data
+dads_15$nest <- factor(dads_15$nest, levels = unique(dads_15$nest[order(dads_15$female)])) #Now sort the "nest" factor by the "female" factor
+dads_15$count <- factor(dads_15$count, levels = unique(dads_15$count[order(dads_15$female)])) #Now sort the "count" factor by the "female" factor
+labels <- dads_15$female[order(dads_15$female)] #Extract labels for plot
+
+#Plot the number of fathers in each nest
+dads_15 %>%
+  ggplot(aes(x=nest), group=Father)+
+  geom_bar()+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle=45, hjust=1))+
+  ylab("# Fathers")+
+  xlab("Nests")+
+  scale_x_discrete(breaks = dads_15$nest, labels = dads_15$female)+
+  geom_text(aes(label = count), stat = "count", vjust = -0.5, colour = "black") #Adds a label of hatchlings sampled per nest
+
+#Look for polygyny
+#First identify any fathers that are present in multiple nests
+dups<-dads_15 %>%
+  filter(duplicated(Father))
+dups<-as.data.frame(dups)
+dups$Father<-as.factor(dups$Father)
+
+#Add binary factor for whether or not a father was present in multiple nests
+dads_15$dup_dads_15<-as.factor(ifelse(dads_15$Father %in% dups$Father, "Yes", "No"))
+
+#Plot hatchlings by nest with breaks for different fathers
+#This is Figure 2
+dads_15.plot<-dads_15 %>%
+  ggplot(aes(x=nest, y=n, fill=dup_dads_15))+  #fill=Father, 
+  geom_col(position="stack", color="black")+
+  scale_fill_manual(values=c("Yes"="white", "No"="grey"))+
+  theme_classic()+
+  scale_x_discrete(breaks = dads_15$nest, labels = dads_15$female)+
+  ylab("Hatchlings")+
+  xlab("Females")+
+  geom_text(data=subset(dads_15, dup_dads_15=="Yes"), aes(label = Father), size=3.5, stat = "identity", vjust = 1.5, colour = "black")+
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle=90, hjust=1, vjust=0.5, size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title.x = element_text(size=13),
+        axis.title.y = element_text(size=13),
+        plot.background = element_rect(colour = "black", fill="white", size=1))
+
+#View dads_15.plot
+dads_15.plot
+```
